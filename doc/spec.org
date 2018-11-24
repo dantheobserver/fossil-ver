@@ -1,0 +1,271 @@
+* Fossil versioning
+  Versioning in the Semver style is very loose on what constitutes a minor/patch
+  version. It relies on everyone generally being on the same page of what they
+  truly think what those versions should involve. In practice, that small amount
+  of leeway has a large field of fire when it comes to each developer as to
+  where it actually lands. This leads to issues such as introducing breaking
+  changes in minor/patch versions including deletions or implentation change Influenced from a talk
+  by Rich Hickey[fn:1], fossil-versioning will allow for a solid
+  namespace-driven versioning system that will prevent the
+
+* Milestone 1 Feature Expectations
+  - Be able to create an initial snapshot namespace routed to latest
+  #+BEGIN_SRC clojure
+    ;; creates versioned ns and routes it to a front-facing ns for latest
+    ;; --src/some-app//core
+    (fossil/ns some-app.core)
+
+    ;; require that namespace but under core name
+    (require '[some-app.core])
+  #+END_SRC
+  - Be able to deprecate a previosly defined function/var in a subsequent version
+    #+BEGIN_SRC clojure
+      (require '[fossil.core :as fossil])
+
+      (fossil/ns some-app.core.1)
+
+      ;;Define a function
+      (defn some-op [a b]
+        (+ (inc a) (dec b)))
+
+      (fossil/ns some-app.core.2)
+
+      (fossil/deprecate some-opp)
+      ;; NOTE Should this be a macro or function with symbol reference?
+    #+END_SRC
+  - Be able to add functions/vars that will replace prior implementations due to
+    bugs/performance issues.
+    #+BEGIN_SRC clojure
+      (require '[fossil.core :as fossil])
+
+      (fossil/ns some-app.core.1)
+      ;;Define a function
+      (fossil/defn some-op
+        "This is the correct operation"
+        [a b]
+        (+ (inc a) (dec b)))
+
+      (fossil/ns some-app.core.2)
+      (fossil/defn
+      "No, THIS is the correct operation"
+      some-opp
+        [a b]
+        (- (dec a) (inc b)))
+    #+END_SRC
+  - Be able to warn users they are directly using functions that have been
+    replaced or deprecated
+    #+BEGIN_SRC clojure
+      ;; Dependency
+      (ns some-app.core
+        (:require [fossil.core :as fossil]))
+
+      (fossil/version 1)
+      (fossil/defn id [a] a)
+
+      (fossil/version 2)
+      (fossil/deprecate "Deprecated please use clojure.core/identity" id)
+
+      ;; Client depending on version 2
+      (ns some-client.core
+        (:require [some-app.core :as c]))
+
+      (c/id 1) ;;throw warning with metadata on issue with affected version and message
+    #+END_SRC
+  - Be able to throw an exception if
+  - Prevent compilation if advancing adding functions to the next version that
+    reference deprecated or removed vars from the previous version
+    #+BEGIN_SRC clojure
+      ;; Dependency
+      (ns some-app.core
+        (:require [fossil.core :as fossil]))
+
+      (fossil/version 1)
+      (fossil/defn id [a] a)
+      (fossil/def some-val b 1)
+
+      (fossil/version 2)
+      (fossil/deprecate "Deprecated please use clojure.core/identity" id)
+      (fossil/undef some-val)
+      (fossil/defn blind-fn [a]
+        (inc some-val)) ;;Throws an error due to value being undefined
+
+      (fossil/version 3)
+      (fossil/defn new-id [a] (id a)) ;;Thows an error as that was deprecated in version 2.
+    #+END_SRC
+
+* Backlog
+* Gotchas and Ideas
+  - Would we need to map to git hash and use that as the version, would this
+    cause too much churn for creating a new version (merging with master to get
+    a hash, possibly missing a window where others also change the master
+    branch. May have to decide another version identifier scheme.
+  - Would this require a strict enforcement the optimal release path of (if
+    adding functions, create or modify a file with the next app version and
+    don't do frequent releases.  This seems very opinionated but the alternative
+    is possible fixes/additions.
+  - should deprecations always throw a warning as unsafe, or should there be a
+    mechanism to restrict use via a 'undef' to remove it in a subsequent namespace
+  - Would a better idea be to allow metadata instead and build core namespace
+    when application is loaded.
+
+    - Functional Version: Seems more clear when dealing with references to
+      undefined versions within subsequent function versions. will throw errors
+      if using a function that has been undefined and has a clear line of sight
+      to the source
+      //TODO: Convert to version-block syntax for easier usage
+    #+BEGIN_SRC clojure
+      ;;;; --file some-app/src/some-app/core.clj
+      (ns some-app.core
+        (:require [fossil.core :refer [version deprecate remove-var defn def]]))
+
+      ;; Fossil/version 1
+      (version 1)
+
+      (def some-var 12)
+
+      (defn id
+        "This is a useful function"
+        [a] (identity a))
+
+      (defn obj-compare [a b]
+        (letfn [wrong-hash [a] (Integer/parseInt (first (hash a)))]
+          (compare (wrong-hash (id a)) (wrong-hash (id b)))))
+
+
+      ;; Version 2
+      (version 2)
+
+      (deprecate
+       "No Longer needed as obj-compare was optimized"
+       id)
+
+      (defn obj-compare [a b]
+        (compare (hash a) (hash b)))
+
+      (version 3)
+
+      (remove-var
+       "never used for anything"
+       some-var)
+
+      ;;;; --file client-app/src/client-app/core.clj
+      ;;;; with a dependency on [org.testco.some-app "2"]
+      (ns client-app.core
+        (:require [some-app.core :as c]))
+
+      (c/id 12) ;;repl>> Warning
+      ;; #:fossil{
+      ;; :type deprecation
+      ;; :current-version 2
+      ;; :affected-version 2
+      ;; :symbol #'some-app.core/id
+      ;; :message "Never used for anything"}
+
+      (c/object-compare [{:a 1} {:a 2}]) ;;equivalent to (c2/object-compare ...)
+      c/some-var ;;depending on versionwhere that var exists, should be fine
+
+
+      ;;;; --file client-app/src/client-app/core.clj
+      ;;;; with a dependency on [org.testco.some-app "3"]
+
+      (ns client-app.core
+        (:require [some-app.core :as c]))
+
+      (c/id 12) ;;still deprecated
+      c/some-var ;;CompilerException java.lang.RuntimeException: No such var: client-app.core/some-var
+    #+END_SRC
+    - Metadata version keeps function changes together, but is that important?
+      can lead to missing usage of vars were deprecated or undefined.
+    #+BEGIN_SRC clojure
+      ;;;; --file some-app/src/some-app/core.clj
+      (ns some-app.core
+        (:require [fossil.core :refer [version deprecate undef defn def]]))
+
+      (def some-var
+        "Some basic var"
+        {:fossil/version 1}
+        12)
+
+      (deprecate some-var
+                 "No longer used"
+                 {:fossil/version 2})
+
+      (undef
+       "never used for anything"
+       {:fossil/version 3}
+       some-var)
+
+
+      (defn id
+        "This is a useful function"
+        {:fossil/version 1}
+        [a] (identity a))
+
+      (deprecate
+       "No Longer needed as obj-compare was optimized"
+       {:fossil/version 2}
+       id)
+
+
+      (defn obj-compare
+        {:fossil/version 1}
+        [a b]
+        (letfn [wrong-hash [a] (Integer/parseInt (first (hash a)))]
+          (compare (wrong-hash (id a)) (wrong-hash (id b)))))
+
+      (defn obj-compare
+        {:fossil/version 2}
+        [a b]
+        (compare (hash a) (hash b)))
+    #+END_SRC
+    - Perhaps the def/defn can allow for adding of additional
+      version/deprecated/undefined metadata
+    #+BEGIN_SRC clojure
+      ;;;; --file some-app/src/some-app/core.clj
+      (ns some-app.core
+        (:require [fossil.core :refer [deprecate undef defn def fmeta]]))
+
+      (def some-var
+        "Some basic var"
+        (fmeta :version 1)
+        12
+        (fmeta :version 2
+               :deprecated
+               :version 3
+               :undefined))
+
+      ;; meta is attached
+      (comment
+        (meta #'some-var :fossil/meta)
+        [#:fossil{:version 2
+                  :deprecated true}
+         #:fossil{:version 3
+                  :undefined true}])
+
+      (defn id
+        "This is a useful function"
+        (fmeta :version 1)
+        [a] (identity a)
+        (fmeta :version 2
+               :deprecated))
+
+      (defn obj-compare
+        (fmeta :version 1)
+        [a b]
+        (letfn [wrong-hash [a] (Integer/parseInt (first (hash a)))]
+          (compare (wrong-hash (id a)) (wrong-hash (id b))))
+
+        (fmeta :version 2)
+        [a b]
+        (compare (hash a) (hash b)))
+    #+END_SRC
+  - Also need to think about how an app that depends on a fossilized app
+    works if that app is also using fossilized. may require the creation of the
+    namespace for specific versions to resolve which version of thedependench is
+    bound to core in each version block.
+  - Other than `declare` what other common functions that would make this completed.
+
+*
+* Footnotes
+
+[fn:1] - TBD video of Rich Talk on namespace based versioning
